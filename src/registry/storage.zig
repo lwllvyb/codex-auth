@@ -9,6 +9,7 @@ const import_mod = @import("import.zig");
 const parse = @import("parse.zig");
 const storage_parse = @import("storage_parse.zig");
 const storage_write = @import("storage_write.zig");
+const version = @import("../version.zig");
 
 const PlanType = common.PlanType;
 const AuthMode = common.AuthMode;
@@ -395,8 +396,8 @@ fn applySchemaMigrations(reg: *Registry, loaded_schema_version: u32) void {
 fn logUnsupportedRegistryVersion(version_value: u32) void {
     if (builtin.is_test) return;
     std.log.err(
-        "registry schema_version {d} is newer than this codex-auth binary supports (max {d}); upgrade codex-auth",
-        .{ version_value, current_schema_version },
+        "registry schema version {d} is not supported by codex-auth {s} (supports up to {d})",
+        .{ version_value, version.app_version, current_schema_version },
     );
 }
 

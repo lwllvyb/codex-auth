@@ -34,6 +34,7 @@ pub fn isHandledCliError(err: anyerror) bool {
         err == error.CodexCliPathNotAccessible or
         err == error.CodexCliPathNotFile or
         err == error.AppLaunchFailed or
+        err == error.UnsupportedRegistryVersion or
         err == error.WindowsAppLaunchRequiresWindows or
         err == error.WindowsAppPlatformRequiresWindows or
         err == error.MacAppPlatformRequiresMacOS or

@@ -138,6 +138,14 @@ fn fakeCodexCommandPath() []const u8 {
     return if (builtin.os.tag == .windows) "fake-bin/codex.cmd" else "fake-bin/codex";
 }
 
+fn fakeCodexPowerShellPath() []const u8 {
+    return "fake-bin/codex.ps1";
+}
+
+fn fakeBareWindowsCodexPath() []const u8 {
+    return "fake-bin/codex";
+}
+
 fn writeFailingFakeCodex(dir: fs.Dir, exit_code: u8) !void {
     var script_buf: [128]u8 = undefined;
     const script = if (builtin.os.tag == .windows)
@@ -158,6 +166,7 @@ fn writeSuccessfulFakeCodex(dir: fs.Dir) !void {
     const script =
         if (builtin.os.tag == .windows)
             "@echo off\r\n" ++
+                ">\"%HOME%\\fake-codex-launcher.txt\" echo cmd\r\n" ++
                 ">\"%HOME%\\fake-codex-argv.txt\" echo %*\r\n" ++
                 ">\"%HOME%\\fake-codex-home.txt\" echo %CODEX_HOME%\r\n" ++
                 "set \"CODEX_HOME_DIR=%CODEX_HOME%\"\r\n" ++
@@ -167,6 +176,7 @@ fn writeSuccessfulFakeCodex(dir: fs.Dir) !void {
                 "exit /b 0\r\n"
         else
             "#!/bin/sh\n" ++
+                "printf '%s\\n' 'posix' > \"$HOME/fake-codex-launcher.txt\"\n" ++
                 "printf '%s\\n' \"$*\" > \"$HOME/fake-codex-argv.txt\"\n" ++
                 "printf '%s\\n' \"$CODEX_HOME\" > \"$HOME/fake-codex-home.txt\"\n" ++
                 "CODEX_HOME_DIR=\"${CODEX_HOME:-$HOME/.codex}\"\n" ++
@@ -187,6 +197,7 @@ fn writeStrictExistingCodexHomeFakeCodex(dir: fs.Dir) !void {
     const script =
         if (builtin.os.tag == .windows)
             "@echo off\r\n" ++
+                ">\"%HOME%\\fake-codex-launcher.txt\" echo cmd\r\n" ++
                 ">\"%HOME%\\fake-codex-argv.txt\" echo %*\r\n" ++
                 ">\"%HOME%\\fake-codex-home.txt\" echo %CODEX_HOME%\r\n" ++
                 "set \"CODEX_HOME_DIR=%CODEX_HOME%\"\r\n" ++
@@ -196,6 +207,7 @@ fn writeStrictExistingCodexHomeFakeCodex(dir: fs.Dir) !void {
                 "exit /b 0\r\n"
         else
             "#!/bin/sh\n" ++
+                "printf '%s\\n' 'posix' > \"$HOME/fake-codex-launcher.txt\"\n" ++
                 "printf '%s\\n' \"$*\" > \"$HOME/fake-codex-argv.txt\"\n" ++
                 "printf '%s\\n' \"$CODEX_HOME\" > \"$HOME/fake-codex-home.txt\"\n" ++
                 "CODEX_HOME_DIR=\"${CODEX_HOME:-$HOME/.codex}\"\n" ++
@@ -210,6 +222,30 @@ fn writeStrictExistingCodexHomeFakeCodex(dir: fs.Dir) !void {
         defer file.close();
         try file.chmod(0o755);
     }
+}
+
+fn writeBrokenBareWindowsCodex(dir: fs.Dir) !void {
+    if (builtin.os.tag != .windows) return;
+    try dir.writeFile(.{
+        .sub_path = fakeBareWindowsCodexPath(),
+        .data = "#!/bin/sh\nexit 99\n",
+    });
+}
+
+fn writeSuccessfulFakeCodexPowerShell(dir: fs.Dir) !void {
+    if (builtin.os.tag != .windows) return;
+
+    const script =
+        "$homePath = $env:HOME\r\n" ++
+        "[System.IO.File]::WriteAllText((Join-Path $homePath 'fake-codex-launcher.txt'), \"ps1`n\")\r\n" ++
+        "[System.IO.File]::WriteAllText((Join-Path $homePath 'fake-codex-argv.txt'), (($args -join ' ') + \"`n\"))\r\n" ++
+        "[System.IO.File]::WriteAllText((Join-Path $homePath 'fake-codex-home.txt'), ($env:CODEX_HOME + \"`n\"))\r\n" ++
+        "$codexHomeDir = $env:CODEX_HOME\r\n" ++
+        "if ([string]::IsNullOrEmpty($codexHomeDir)) { $codexHomeDir = Join-Path $homePath '.codex' }\r\n" ++
+        "if (-not (Test-Path -LiteralPath $codexHomeDir)) { New-Item -ItemType Directory -Path $codexHomeDir | Out-Null }\r\n" ++
+        "Copy-Item -Force (Join-Path $homePath 'fake-auth.json') (Join-Path $codexHomeDir 'auth.json')\r\n";
+
+    try dir.writeFile(.{ .sub_path = fakeCodexPowerShellPath(), .data = script });
 }
 
 fn fakeCurlCommandPath() []const u8 {
@@ -872,6 +908,100 @@ test "Scenario: Given strict codex login when running login then scratch CODEX_H
     defer loaded.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 1), loaded.accounts.items.len);
     try std.testing.expect(std.mem.eql(u8, loaded.accounts.items[0].email, expected_email));
+}
+
+test "Scenario: Given npm-style Windows codex wrappers when running login then the bare script is ignored and codex.cmd is launched" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = fs.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+    try tmp.dir.makePath(".codex");
+    try tmp.dir.makePath("fake-bin");
+
+    const expected_email = "windows-cmd@example.com";
+    const fake_auth = try fixtures.authJsonWithEmailPlan(gpa, expected_email, "plus");
+    defer gpa.free(fake_auth);
+    try tmp.dir.writeFile(.{ .sub_path = "fake-auth.json", .data = fake_auth });
+    try writeBrokenBareWindowsCodex(tmp.dir);
+    try writeStrictExistingCodexHomeFakeCodex(tmp.dir);
+
+    const fake_bin_path = try fs.path.join(gpa, &[_][]const u8{ home_root, "fake-bin" });
+    defer gpa.free(fake_bin_path);
+    const path_override = try prependPathEntryAlloc(gpa, fake_bin_path);
+    defer gpa.free(path_override);
+
+    const result = try runCliWithIsolatedHomeAndPath(
+        gpa,
+        project_root,
+        home_root,
+        path_override,
+        &[_][]const u8{ "login", "--device-auth" },
+    );
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectSuccess(result);
+
+    const launcher_path = try fs.path.join(gpa, &[_][]const u8{ home_root, "fake-codex-launcher.txt" });
+    defer gpa.free(launcher_path);
+    const launcher_data = try fixtures.readFileAlloc(gpa, launcher_path);
+    defer gpa.free(launcher_data);
+    try std.testing.expectEqualStrings("cmd", std.mem.trim(u8, launcher_data, " \r\n"));
+}
+
+test "Scenario: Given only a PowerShell Windows codex launcher when running login then codex.ps1 is launched via PowerShell" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = fs.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+    try tmp.dir.makePath(".codex");
+    try tmp.dir.makePath("fake-bin");
+
+    const expected_email = "windows-ps1@example.com";
+    const fake_auth = try fixtures.authJsonWithEmailPlan(gpa, expected_email, "plus");
+    defer gpa.free(fake_auth);
+    try tmp.dir.writeFile(.{ .sub_path = "fake-auth.json", .data = fake_auth });
+    try writeBrokenBareWindowsCodex(tmp.dir);
+    try writeSuccessfulFakeCodexPowerShell(tmp.dir);
+
+    const fake_bin_path = try fs.path.join(gpa, &[_][]const u8{ home_root, "fake-bin" });
+    defer gpa.free(fake_bin_path);
+    const path_override = try prependPathEntryAlloc(gpa, fake_bin_path);
+    defer gpa.free(path_override);
+
+    const result = try runCliWithIsolatedHomeAndPath(
+        gpa,
+        project_root,
+        home_root,
+        path_override,
+        &[_][]const u8{ "login", "--device-auth" },
+    );
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectSuccess(result);
+
+    const launcher_path = try fs.path.join(gpa, &[_][]const u8{ home_root, "fake-codex-launcher.txt" });
+    defer gpa.free(launcher_path);
+    const launcher_data = try fixtures.readFileAlloc(gpa, launcher_path);
+    defer gpa.free(launcher_data);
+    try std.testing.expectEqualStrings("ps1", std.mem.trim(u8, launcher_data, " \r\n"));
 }
 
 test "Scenario: Given refreshed active auth before login when running login then old account snapshot is synced first" {

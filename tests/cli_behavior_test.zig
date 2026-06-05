@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("codex_auth").cli;
+const fs = @import("codex_auth").core.compat_fs;
 const registry = @import("codex_auth").registry;
 
 const ansi = struct {
@@ -822,6 +823,72 @@ test "Scenario: Given login help when rendering then device auth usage is includ
 test "Scenario: Given login options when building codex argv then device auth is forwarded" {
     try expectArgv(cli.login.codexLoginArgs(.{}), &[_][]const u8{ "codex", "login" });
     try expectArgv(cli.login.codexLoginArgs(.{ .device_auth = true }), &[_][]const u8{ "codex", "login", "--device-auth" });
+}
+
+test "Scenario: Given winget and npm Windows launchers when resolving then PATH entry order is preserved" {
+    const gpa = std.testing.allocator;
+    var tmp = fs.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("winget-bin");
+    try tmp.dir.makePath("npm-bin");
+    try tmp.dir.writeFile(.{ .sub_path = "winget-bin/codex.exe", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex", .data = "#!/bin/sh\nexit 1\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex.cmd", .data = "@echo off\r\nexit /b 0\r\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex.ps1", .data = "exit 0\n" });
+
+    const root_dir = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root_dir);
+    const winget_dir = try std.fs.path.join(gpa, &[_][]const u8{ root_dir, "winget-bin" });
+    defer gpa.free(winget_dir);
+    const npm_dir = try std.fs.path.join(gpa, &[_][]const u8{ root_dir, "npm-bin" });
+    defer gpa.free(npm_dir);
+
+    var exe_first = (try cli.login.resolveWindowsCodexPathEntriesAlloc(gpa, &[_][]const u8{ winget_dir, npm_dir })) orelse return error.TestUnexpectedResult;
+    defer exe_first.deinit(gpa);
+    try std.testing.expectEqual(cli.login.WindowsCodexPathKind.exe, exe_first.kind);
+    try std.testing.expect(std.mem.endsWith(u8, exe_first.path, "codex.exe"));
+
+    var cmd_first = (try cli.login.resolveWindowsCodexPathEntriesAlloc(gpa, &[_][]const u8{ npm_dir, winget_dir })) orelse return error.TestUnexpectedResult;
+    defer cmd_first.deinit(gpa);
+    try std.testing.expectEqual(cli.login.WindowsCodexPathKind.cmd, cmd_first.kind);
+    try std.testing.expect(std.mem.endsWith(u8, cmd_first.path, "codex.cmd"));
+}
+
+test "Scenario: Given only PowerShell Windows launcher when resolving then ps1 is used after cmd is absent" {
+    const gpa = std.testing.allocator;
+    var tmp = fs.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("npm-bin");
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex", .data = "#!/bin/sh\nexit 1\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex.ps1", .data = "exit 0\n" });
+
+    const root_dir = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root_dir);
+    const npm_dir = try std.fs.path.join(gpa, &[_][]const u8{ root_dir, "npm-bin" });
+    defer gpa.free(npm_dir);
+
+    var resolved = (try cli.login.resolveWindowsCodexPathEntriesAlloc(gpa, &[_][]const u8{npm_dir})) orelse return error.TestUnexpectedResult;
+    defer resolved.deinit(gpa);
+    try std.testing.expectEqual(cli.login.WindowsCodexPathKind.ps1, resolved.kind);
+    try std.testing.expect(std.mem.endsWith(u8, resolved.path, "codex.ps1"));
+}
+
+test "Scenario: Given only the bare npm shell launcher on Windows when resolving then it is ignored" {
+    const gpa = std.testing.allocator;
+    var tmp = fs.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("npm-bin");
+    try tmp.dir.writeFile(.{ .sub_path = "npm-bin/codex", .data = "#!/bin/sh\nexit 1\n" });
+
+    const root_dir = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root_dir);
+    const npm_dir = try std.fs.path.join(gpa, &[_][]const u8{ root_dir, "npm-bin" });
+    defer gpa.free(npm_dir);
+
+    try std.testing.expect((try cli.login.resolveWindowsCodexPathEntriesAlloc(gpa, &[_][]const u8{npm_dir})) == null);
 }
 
 test "Scenario: Given switch with positional query when parsing then non-interactive target is preserved" {

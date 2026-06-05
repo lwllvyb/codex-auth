@@ -40,9 +40,14 @@ const CodexLaunch = struct {
 
 const WindowsCodexPathList = std.ArrayList(WindowsCodexPath);
 
-const RetryableWindowsCodexBuildError = enum {
+pub const RetryableWindowsCodexBuildError = enum {
     command_processor_not_found,
     powershell_not_found,
+};
+
+pub const WindowsCodexLaunchFailure = struct {
+    hint_name: []const u8,
+    err: anyerror,
 };
 
 pub fn codexLoginArgs(opts: types.LoginOptions) []const []const u8 {
@@ -433,6 +438,36 @@ fn shouldRetryWindowsCodexBuild(err: anyerror, kind: WindowsCodexPathKind) ?Retr
     };
 }
 
+pub fn finalRetryableWindowsCodexLaunchFailure(
+    last_retryable_spawn_error: ?std.process.SpawnError,
+    last_retryable_build_error: ?RetryableWindowsCodexBuildError,
+) ?WindowsCodexLaunchFailure {
+    if (last_retryable_build_error) |build_err| {
+        if (last_retryable_spawn_error) |spawn_err| {
+            if (spawn_err != error.FileNotFound) {
+                return .{
+                    .hint_name = @errorName(spawn_err),
+                    .err = spawn_err,
+                };
+            }
+        }
+
+        return .{
+            .hint_name = retryableWindowsCodexBuildErrorName(build_err),
+            .err = retryableWindowsCodexBuildErrorValue(build_err),
+        };
+    }
+
+    if (last_retryable_spawn_error) |spawn_err| {
+        return .{
+            .hint_name = @errorName(spawn_err),
+            .err = spawn_err,
+        };
+    }
+
+    return null;
+}
+
 fn shouldRetryWindowsCodexLaunch(err: std.process.SpawnError, kind: WindowsCodexPathKind) bool {
     return switch (err) {
         error.FileNotFound => true,
@@ -494,14 +529,12 @@ pub fn runCodexLogin(opts: types.LoginOptions, codex_home: []const u8) !void {
             return ensureCodexLoginSucceeded(term);
         }
 
-        if (last_retryable_spawn_error) |err| {
-            writeCodexLoginLaunchFailureHint(@errorName(err)) catch {};
-            return err;
-        }
-
-        const build_err = last_retryable_build_error orelse unreachable;
-        writeCodexLoginLaunchFailureHint(retryableWindowsCodexBuildErrorName(build_err)) catch {};
-        return retryableWindowsCodexBuildErrorValue(build_err);
+        const failure = finalRetryableWindowsCodexLaunchFailure(
+            last_retryable_spawn_error,
+            last_retryable_build_error,
+        ) orelse unreachable;
+        writeCodexLoginLaunchFailureHint(failure.hint_name) catch {};
+        return failure.err;
     }
 
     var launch = buildCodexLaunchAlloc(std.heap.page_allocator, opts) catch |err| {

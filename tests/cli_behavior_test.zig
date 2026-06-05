@@ -970,6 +970,26 @@ test "Scenario: Given only PowerShell Windows launcher when resolving then ps1 i
     try std.testing.expect(std.mem.endsWith(u8, resolved.path, "codex.ps1"));
 }
 
+test "Scenario: Given retryable Windows build and spawn failures when selecting the final hint then build failure beats generic FileNotFound" {
+    const failure = cli.login.finalRetryableWindowsCodexLaunchFailure(
+        error.FileNotFound,
+        .powershell_not_found,
+    ) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualStrings("PowerShellNotFound", failure.hint_name);
+    try std.testing.expect(failure.err == error.PowerShellNotFound);
+}
+
+test "Scenario: Given retryable Windows build and spawn failures when selecting the final hint then non-generic spawn failure still wins" {
+    const failure = cli.login.finalRetryableWindowsCodexLaunchFailure(
+        error.AccessDenied,
+        .powershell_not_found,
+    ) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualStrings("AccessDenied", failure.hint_name);
+    try std.testing.expect(failure.err == error.AccessDenied);
+}
+
 test "Scenario: Given switch with positional query when parsing then non-interactive target is preserved" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "switch", "user@example.com" };

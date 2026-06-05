@@ -10,6 +10,7 @@ const output = @import("output.zig");
 pub const WindowsCodexPathKind = enum {
     exe,
     cmd,
+    ps1,
 };
 
 pub const WindowsCodexPath = struct {
@@ -101,6 +102,7 @@ fn windowsCodexCandidateName(kind: WindowsCodexPathKind) []const u8 {
     return switch (kind) {
         .exe => "codex.exe",
         .cmd => "codex.cmd",
+        .ps1 => "codex.ps1",
     };
 }
 
@@ -130,9 +132,11 @@ fn appendWindowsCodexPathCandidateIfAvailable(
 
 fn appendWindowsCodexPathEntryCandidatesAlloc(
     allocator: std.mem.Allocator,
-    candidates: *WindowsCodexPathList,
+    native_candidates: *WindowsCodexPathList,
+    ps1_candidates: *WindowsCodexPathList,
     entry: []const u8,
     path_ext: []const u8,
+    allow_ps1: bool,
 ) !void {
     var seen_exe = false;
     var seen_cmd = false;
@@ -150,8 +154,13 @@ fn appendWindowsCodexPathEntryCandidatesAlloc(
                 if (seen_cmd) continue;
                 seen_cmd = true;
             },
+            .ps1 => unreachable,
         }
-        try appendWindowsCodexPathCandidateIfAvailable(allocator, candidates, entry, kind);
+        try appendWindowsCodexPathCandidateIfAvailable(allocator, native_candidates, entry, kind);
+    }
+
+    if (allow_ps1) {
+        try appendWindowsCodexPathCandidateIfAvailable(allocator, ps1_candidates, entry, .ps1);
     }
 }
 
@@ -160,25 +169,40 @@ fn deinitWindowsCodexPathList(allocator: std.mem.Allocator, candidates: *Windows
     candidates.deinit(allocator);
 }
 
+fn appendWindowsCodexPathLists(
+    allocator: std.mem.Allocator,
+    dst: *WindowsCodexPathList,
+    src: *WindowsCodexPathList,
+) !void {
+    try dst.appendSlice(allocator, src.items);
+    src.clearRetainingCapacity();
+}
+
 fn collectWindowsCodexPathEntriesWithPathExtAlloc(
     allocator: std.mem.Allocator,
     entries: []const []const u8,
     path_ext: []const u8,
 ) !WindowsCodexPathList {
-    var candidates: WindowsCodexPathList = .empty;
-    errdefer deinitWindowsCodexPathList(allocator, &candidates);
+    var native_candidates: WindowsCodexPathList = .empty;
+    errdefer deinitWindowsCodexPathList(allocator, &native_candidates);
+    var ps1_candidates: WindowsCodexPathList = .empty;
+    errdefer deinitWindowsCodexPathList(allocator, &ps1_candidates);
 
     for (entries) |entry| {
         if (entry.len == 0) continue;
         try appendWindowsCodexPathEntryCandidatesAlloc(
             allocator,
-            &candidates,
+            &native_candidates,
+            &ps1_candidates,
             entry,
             path_ext,
+            true,
         );
     }
 
-    return candidates;
+    try appendWindowsCodexPathLists(allocator, &native_candidates, &ps1_candidates);
+    ps1_candidates.deinit(allocator);
+    return native_candidates;
 }
 
 fn resolveWindowsCodexPathEntryWithPathExtAlloc(
@@ -214,16 +238,19 @@ fn resolveWindowsCodexPathValueAlloc(
     allocator: std.mem.Allocator,
     path_value: []const u8,
     path_ext: []const u8,
-    candidates: *WindowsCodexPathList,
+    native_candidates: *WindowsCodexPathList,
+    ps1_candidates: *WindowsCodexPathList,
 ) !void {
     var path_it = std.mem.splitScalar(u8, path_value, std.fs.path.delimiter);
     while (path_it.next()) |entry| {
         if (entry.len == 0) continue;
         try appendWindowsCodexPathEntryCandidatesAlloc(
             allocator,
-            candidates,
+            native_candidates,
+            ps1_candidates,
             entry,
             path_ext,
+            true,
         );
     }
 }
@@ -232,18 +259,26 @@ fn collectWindowsCodexPathsAlloc(allocator: std.mem.Allocator) !WindowsCodexPath
     const path_ext = try resolveWindowsCodexPathExtAlloc(allocator);
     defer allocator.free(path_ext);
 
-    var candidates: WindowsCodexPathList = .empty;
-    errdefer deinitWindowsCodexPathList(allocator, &candidates);
+    var native_candidates: WindowsCodexPathList = .empty;
+    errdefer deinitWindowsCodexPathList(allocator, &native_candidates);
+    var ps1_candidates: WindowsCodexPathList = .empty;
+    errdefer deinitWindowsCodexPathList(allocator, &ps1_candidates);
 
     try appendWindowsCodexPathEntryCandidatesAlloc(
         allocator,
-        &candidates,
+        &native_candidates,
+        &ps1_candidates,
         ".",
         path_ext,
+        false,
     );
 
     const path_value = http_env.getEnvVarOwned(allocator, "PATH") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return candidates,
+        error.EnvironmentVariableNotFound => {
+            try appendWindowsCodexPathLists(allocator, &native_candidates, &ps1_candidates);
+            ps1_candidates.deinit(allocator);
+            return native_candidates;
+        },
         else => return err,
     };
     defer allocator.free(path_value);
@@ -252,9 +287,12 @@ fn collectWindowsCodexPathsAlloc(allocator: std.mem.Allocator) !WindowsCodexPath
         allocator,
         path_value,
         path_ext,
-        &candidates,
+        &native_candidates,
+        &ps1_candidates,
     );
-    return candidates;
+    try appendWindowsCodexPathLists(allocator, &native_candidates, &ps1_candidates);
+    ps1_candidates.deinit(allocator);
+    return native_candidates;
 }
 
 fn resolveOptionalExecutableAlloc(
@@ -272,6 +310,12 @@ fn resolveWindowsCmdExecutableAlloc(allocator: std.mem.Allocator) ![]u8 {
         error.ExecutableRequired => error.CommandProcessorNotFound,
         else => err,
     };
+}
+
+fn resolveWindowsPowerShellExecutableAlloc(allocator: std.mem.Allocator) ![]u8 {
+    if (try resolveOptionalExecutableAlloc(allocator, "powershell.exe")) |path| return path;
+    if (try resolveOptionalExecutableAlloc(allocator, "pwsh.exe")) |path| return path;
+    return error.PowerShellNotFound;
 }
 
 fn buildCodexLaunchAlloc(allocator: std.mem.Allocator, opts: types.LoginOptions) !CodexLaunch {
@@ -314,6 +358,24 @@ fn buildWindowsCodexLaunchAlloc(
             if (opts.device_auth) {
                 launch.argv_storage[5] = "--device-auth";
                 launch.argv_len = 6;
+            }
+            return launch;
+        },
+        .ps1 => {
+            const powershell = try resolveWindowsPowerShellExecutableAlloc(allocator);
+            errdefer allocator.free(powershell);
+
+            var launch = CodexLaunch{ .owned_paths = .{powershell} };
+            launch.argv_storage[0] = powershell;
+            launch.argv_storage[1] = "-NoLogo";
+            launch.argv_storage[2] = "-NoProfile";
+            launch.argv_storage[3] = "-File";
+            launch.argv_storage[4] = resolved.path;
+            launch.argv_storage[5] = "login";
+            launch.argv_len = 6;
+            if (opts.device_auth) {
+                launch.argv_storage[6] = "--device-auth";
+                launch.argv_len = 7;
             }
             return launch;
         },
